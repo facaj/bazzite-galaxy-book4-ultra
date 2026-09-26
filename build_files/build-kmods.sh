@@ -8,19 +8,15 @@ set -euxo pipefail
 REPO_FILE_URL="https://packages.caioregis.com/fedora/caioregis.repo"
 KMODS=(galaxybook-ov02c10 galaxybook-max98390)
 
-dnf5 -y install dnf5-plugins akmods rpm-build openssl kmod cpio
+dnf5 -y install dnf5-plugins akmods rpm-build openssl kmod cpio gcc make elfutils-libelf-devel dwarves
 
-### Kernel do Bazzite + kernel-devel (vêm da imagem ghcr.io/ublue-os/akmods).
-### O kernel inteiro é instalado só neste estágio descartável, porque o RPM
-### gerado pelo akmods exige kernel-uname-r = ${KERNEL_VERSION}.
+### kernel-devel do Bazzite (vem da imagem ghcr.io/ublue-os/akmods)
 if [[ ! -f "/tmp/kernel-rpms/kernel-devel-${KERNEL_VERSION}.rpm" ]]; then
     echo "kernel-devel-${KERNEL_VERSION}.rpm não encontrado. Conteúdo disponível:" >&2
     ls -1 /tmp/kernel-rpms >&2
     exit 1
 fi
-mapfile -t kernel_rpms < <(find /tmp/kernel-rpms -maxdepth 1 -name "*-${KERNEL_VERSION}.rpm" ! -name '*uki*')
-# noscripts: o kernel não vai dar boot aqui; evita rodar kernel-install/dracut
-dnf5 -y install --setopt=install_weak_deps=False --setopt=tsflags=noscripts "${kernel_rpms[@]}"
+dnf5 -y install --setopt=install_weak_deps=False "/tmp/kernel-rpms/kernel-devel-${KERNEL_VERSION}.rpm"
 test -d "/usr/src/kernels/${KERNEL_VERSION}"
 
 ### Chave de assinatura para Secure Boot (opcional)
@@ -40,49 +36,59 @@ else
     rm -rf /etc/pki/akmods/private /etc/pki/akmods/certs
 fi
 
-### akmods do repositório dedicado
+### Código-fonte dos drivers, tirado dos pacotes akmod do repositório dedicado.
+### Os módulos são compilados direto com make (como o próprio Galaxy Book Setup
+### faz para o MAX98390): o spec do akmod-galaxybook-max98390 não compila nada
+### quando rodado pelo akmods, e o akmods não serve fora de um sistema em boot.
 dnf5 -y config-manager addrepo --from-repofile="${REPO_FILE_URL}"
 dnf5 -y install --setopt=install_weak_deps=False "${KMODS[@]/#/akmod-}"
 
-# O akmods retorna 0 mesmo quando o build falha, então o resultado é conferido
-# pelo RPM gerado em /var/cache/akmods, e não pelo código de saída.
+KDIR="/usr/src/kernels/${KERNEL_VERSION}"
 STAGING=/tmp/kmod-staging
-mkdir -p "${STAGING}"
-failed=()
-for kmod in "${KMODS[@]}"; do
-    akmods --force --kernels "${KERNEL_VERSION}" --kmod "${kmod}" || true
-    rpmfile=$(find "/var/cache/akmods/${kmod}" -name "*-for-${KERNEL_VERSION}.rpm" 2>/dev/null | head -n1)
-    if [[ -z "${rpmfile}" ]]; then
-        echo "::error::${kmod} não compilou para ${KERNEL_VERSION}" >&2
-        find "/var/cache/akmods/${kmod}" -name '*.log' -print -exec cat {} \; >&2 || true
-        failed+=("${kmod}")
-        continue
-    fi
-    echo "RPM gerado: ${rpmfile}"
-    rpm -qlp "${rpmfile}"
-    (cd "${STAGING}" && rpm2cpio "${rpmfile}" | cpio -idm --quiet)
-done
-if [[ ${#failed[@]} -gt 0 ]]; then
-    echo "Falha ao compilar: ${failed[*]} (log acima)" >&2
-    exit 1
-fi
+MODDIR="${STAGING}/usr/lib/modules/${KERNEL_VERSION}/extra"
 
-# Normaliza /lib/modules -> /usr/lib/modules (no Bazzite /lib é symlink)
-if [[ -d "${STAGING}/lib" ]]; then
-    mkdir -p "${STAGING}/usr"
-    cp -a "${STAGING}/lib" "${STAGING}/usr/"
-    rm -rf "${STAGING:?}/lib"
-fi
+# $1 = kmod, $2 = destino relativo a extra/, $3.. = módulos .ko
+build_kmod() {
+    local kmod="$1" dest="$2"; shift 2
+    local work="/tmp/src-${kmod}" srpm archive srcdir
+    srpm="$(readlink -f "/usr/src/akmods/${kmod}-kmod.latest")"
+    mkdir -p "${work}"
+    (cd "${work}" && rpm2cpio "${srpm}" | cpio -idm --quiet)
+    archive="$(find "${work}" -maxdepth 1 -name "${kmod}-kmod-*.tar.gz" | head -n1)"
+    tar -C "${work}" -xf "${archive}"
+    srcdir="$(find "${work}" -maxdepth 1 -mindepth 1 -type d -name "${kmod}-kmod-*" | head -n1)"
 
-### Confere se os módulos esperados saíram do build
+    make -C "${KDIR}" M="${srcdir}/module" modules
+
+    mkdir -p "${MODDIR}/${dest}"
+    for mod in "$@"; do
+        if [[ ${SIGNED} -eq 1 ]]; then
+            "${KDIR}/scripts/sign-file" sha256 \
+                /etc/pki/akmods/private/private_key.priv \
+                /etc/pki/akmods/certs/public_key.der \
+                "${srcdir}/module/${mod}.ko"
+        fi
+        install -m0644 "${srcdir}/module/${mod}.ko" "${MODDIR}/${dest}/${mod}.ko"
+    done
+}
+
+# Mesmos caminhos dos pacotes kmod oficiais (o Galaxy Book Setup confere extra/galaxybook-ov02c10)
+build_kmod galaxybook-ov02c10 galaxybook-ov02c10/drivers/media/i2c ov02c10
+build_kmod galaxybook-max98390 galaxybook-max98390/sound/hda/codecs/side-codecs \
+    snd-hda-scodec-max98390 snd-hda-scodec-max98390-i2c
+
+### Confere os módulos gerados
 for mod in ov02c10 snd-hda-scodec-max98390 snd-hda-scodec-max98390-i2c; do
-    path=$(find "${STAGING}" -name "${mod}.ko*" | head -n1)
+    path=$(find "${STAGING}" -name "${mod}.ko" | head -n1)
     if [[ -z "${path}" ]]; then
-        echo "Módulo ${mod} não está nos RPMs gerados pelo akmods" >&2
-        find "${STAGING}" -type f >&2
+        echo "Módulo ${mod} não foi gerado" >&2
         exit 1
     fi
     modinfo "${path}"
+    if [[ "$(modinfo -F vermagic "${path}")" != "${KERNEL_VERSION} "* ]]; then
+        echo "Módulo ${mod} não foi compilado para ${KERNEL_VERSION}" >&2
+        exit 1
+    fi
     if [[ ${SIGNED} -eq 1 ]] && [[ -z "$(modinfo -F signer "${path}")" ]]; then
         echo "Módulo ${mod} não está assinado apesar da chave MOK" >&2
         exit 1
