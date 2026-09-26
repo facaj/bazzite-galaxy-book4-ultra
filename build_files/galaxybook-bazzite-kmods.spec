@@ -25,10 +25,9 @@ Módulos ov02c10 (câmera) e MAX98390 (alto-falantes) compilados na hora do
 build da imagem contra o kernel %{kernel_version}.
 
 %install
-for dir in /usr/lib/modules/%{kernel_version}/extra/galaxybook-*; do
-  mkdir -p %{buildroot}/usr/lib/modules/%{kernel_version}/extra
-  cp -a "$dir" %{buildroot}/usr/lib/modules/%{kernel_version}/extra/
-done
+while read -r f; do
+  install -Dm0644 "%{staging}${f}" "%{buildroot}${f}"
+done < %{filelist}
 
 %post
 /usr/sbin/depmod -a %{kernel_version} || :
@@ -36,5 +35,4 @@ done
 %postun
 /usr/sbin/depmod -a %{kernel_version} || :
 
-%files
-/usr/lib/modules/%{kernel_version}/extra/galaxybook-*
+%files -f %{filelist}
