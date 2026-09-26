@@ -1,0 +1,101 @@
+name: Build Bazzite image
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - '**.md'
+      - 'img/**'
+  schedule:
+    # Todo dia, para acompanhar as atualizações do Bazzite (kernel novo = módulos novos)
+    - cron: '20 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: kde
+            base_image: ghcr.io/ublue-os/bazzite-nvidia-open:stable
+            image_name: bazzite-galaxy-book4-ultra
+          - variant: gnome
+            base_image: ghcr.io/ublue-os/bazzite-gnome-nvidia-open:stable
+            image_name: bazzite-gnome-galaxy-book4-ultra
+
+    env:
+      PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Detect Bazzite kernel
+        run: |
+          set -euo pipefail
+          podman pull "${{ matrix.base_image }}"
+          KERNEL_VERSION="$(podman run --rm --entrypoint /usr/bin/ls "${{ matrix.base_image }}" /usr/lib/modules | head -n1)"
+          FEDORA_VERSION="$(sed -E 's/.*\.fc([0-9]+)\..*/\1/' <<<"${KERNEL_VERSION}")"
+          echo "KERNEL_VERSION=${KERNEL_VERSION}" >> "$GITHUB_ENV"
+          echo "FEDORA_VERSION=${FEDORA_VERSION}" >> "$GITHUB_ENV"
+          echo "Kernel ${KERNEL_VERSION} / Fedora ${FEDORA_VERSION}"
+
+      - name: Prepare signing secrets
+        env:
+          MOK_PRIVATE_KEY: ${{ secrets.MOK_PRIVATE_KEY }}
+          MOK_PUBLIC_CERT: ${{ secrets.MOK_PUBLIC_CERT }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/secrets"
+          : > "$RUNNER_TEMP/secrets/mok_key"
+          : > "$RUNNER_TEMP/secrets/mok_cert"
+          if [[ -n "${MOK_PRIVATE_KEY}" && -n "${MOK_PUBLIC_CERT}" ]]; then
+            printf '%s\n' "${MOK_PRIVATE_KEY}" > "$RUNNER_TEMP/secrets/mok_key"
+            base64 -d <<<"${MOK_PUBLIC_CERT}" > "$RUNNER_TEMP/secrets/mok_cert"
+            echo "Módulos serão assinados com a chave MOK do repositório."
+          else
+            echo "::warning::Secrets MOK_PRIVATE_KEY/MOK_PUBLIC_CERT ausentes: módulos sem assinatura (Secure Boot precisa estar desativado)."
+          fi
+
+      - name: Build image
+        run: |
+          set -euo pipefail
+          podman build \
+            --build-arg "BASE_IMAGE=${{ matrix.base_image }}" \
+            --build-arg "KERNEL_VERSION=${KERNEL_VERSION}" \
+            --build-arg "FEDORA_VERSION=${FEDORA_VERSION}" \
+            --secret "id=mok_key,src=$RUNNER_TEMP/secrets/mok_key" \
+            --secret "id=mok_cert,src=$RUNNER_TEMP/secrets/mok_cert" \
+            --label "org.opencontainers.image.title=${{ matrix.image_name }}" \
+            --label "org.opencontainers.image.description=Bazzite com suporte ao Samsung Galaxy Book4 Ultra (câmera, alto-falantes, NVIDIA)" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "ostree.linux=${KERNEL_VERSION}" \
+            --tag "localhost/${{ matrix.image_name }}:stable" \
+            --file Containerfile .
+          rm -rf "$RUNNER_TEMP/secrets"
+
+      - name: Push to GHCR
+        if: env.PUBLISH == 'true'
+        run: |
+          set -euo pipefail
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for tag in stable "stable-$(date -u +%Y%m%d)"; do
+            podman push "localhost/${{ matrix.image_name }}:stable" "${registry}/${{ matrix.image_name }}:${tag}"
+          done

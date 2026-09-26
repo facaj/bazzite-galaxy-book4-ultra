@@ -5,24 +5,120 @@
   <a href="README.it.md">🇮🇹 Italiano</a>
 </p>
 
-# Fedora sul Samsung Galaxy Book4 Ultra
+# Bazzite sul Samsung Galaxy Book4 Ultra
 
-## Installazione rapida
+Guida e immagine di sistema per usare **Bazzite** sul Samsung Galaxy Book4
+Ultra con fotocamera interna, altoparlanti interni, NVIDIA e le app `Galaxy
+Book Câmera`, `Galaxy Book Setup` e `Galaxy Book Sound` già installate.
 
-Per installare la linea attuale del supporto principale del notebook tramite repository DNF:
+Questo repository nasce dalla guida per Fedora e riutilizza i progetti dedicati
+di [regiscaio](https://github.com/regiscaio). Il contenuto tecnico
+sull'hardware resta valido; su Bazzite cambia **come** installarlo.
+
+## Perché Bazzite ha bisogno di un'immagine propria
+
+- Bazzite è immutabile (`/usr` è in sola lettura), quindi `sudo dnf install`
+  non funziona sul sistema.
+- Anche `rpm-ostree install akmod-galaxybook-*` fallisce: Bazzite usa un kernel
+  proprio (`ogc`), senza `kernel-devel` nei repository di Fedora, e `akmods`
+  non riesce a compilare i driver `ov02c10` e `MAX98390`.
+- La soluzione è un'**immagine derivata da Bazzite**, generata da questo
+  repository, con i driver compilati per il kernel esatto dell'immagine e le
+  app già installate. Viene ricompilata ogni giorno per seguire i nuovi kernel
+  di Bazzite.
+
+## Installazione su Bazzite
+
+### 1. Pubblicare l'immagine (una volta)
+
+Il workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) genera
+due varianti ogni giorno e a ogni push su `master`:
+
+| Variante | Base                                              | Immagine generata                                        |
+| :------- | :------------------------------------------------ | :------------------------------------------------------- |
+| KDE      | `ghcr.io/ublue-os/bazzite-nvidia-open:stable`       | `ghcr.io/facaj/bazzite-galaxy-book4-ultra:stable`        |
+| GNOME    | `ghcr.io/ublue-os/bazzite-gnome-nvidia-open:stable` | `ghcr.io/facaj/bazzite-gnome-galaxy-book4-ultra:stable`  |
+
+Dopo il primo build, in **GitHub > Packages**, rendi i pacchetti **pubblici**
+così che il notebook possa scaricarli.
+
+**Secure Boot:** prima del primo build, genera la chiave che firma i driver e
+registrala come secrets del repository (`MOK_PRIVATE_KEY` e
+`MOK_PUBLIC_CERT`):
 
 ```bash
-sudo dnf config-manager addrepo --from-repofile=https://packages.caioregis.com/fedora/caioregis.repo
-sudo dnf install galaxybook-camera galaxybook-setup galaxybook-sound akmod-galaxybook-ov02c10 akmod-galaxybook-max98390
+./scripts/generate-mok-key.sh
 ```
 
-Questo flusso installa:
+Senza questi secrets l'immagine viene comunque generata, ma con i driver non
+firmati; in quel caso Secure Boot deve essere disattivato.
 
-- l'app fotocamera per l'uso quotidiano del notebook;
-- l'assistente grafico per installazione, validazione e diagnosi;
-- l'app audio per la regolazione quotidiana, con equalizzatore, profili e toggle `Atmos compatibile`;
-- il driver `ov02c10` impacchettato come `akmod`;
-- il supporto `MAX98390` impacchettato come `akmod` per gli altoparlanti interni.
+### 2. Passare il notebook all'immagine
+
+Con Bazzite già installato sul notebook:
+
+```bash
+rpm-ostree rebase ostree-unverified-registry:ghcr.io/facaj/bazzite-galaxy-book4-ultra:stable
+systemctl reboot
+```
+
+Per GNOME, usa `ghcr.io/facaj/bazzite-gnome-galaxy-book4-ultra:stable`.
+
+### 3. Secure Boot
+
+Se Secure Boot è attivo, registra la chiave dei driver (oltre alla chiave di
+Bazzite stesso, `ujust enroll-secure-boot-key`):
+
+```bash
+ujust galaxybook-enroll-key
+systemctl reboot
+```
+
+Nella schermata blu del MOK, scegli `Enroll MOK` > `Continue` > `Yes` e digita
+la password impostata nel comando.
+
+### 4. Verificare
+
+```bash
+ujust galaxybook-status
+```
+
+### Build locale (senza GitHub)
+
+Si può anche generare l'immagine sul notebook stesso con `podman`:
+
+```bash
+sudo ./scripts/build-local.sh
+sudo bootc switch --transport containers-storage localhost/bazzite-galaxy-book4-ultra:latest
+systemctl reboot
+```
+
+L'immagine locale non si aggiorna da sola: rigenerala quando Bazzite porta un
+nuovo kernel.
+
+### Aggiornamenti e ripristino
+
+- Gli aggiornamenti normali di Bazzite (`ujust update` o automatici) scaricano
+  ora questa immagine, ricompilata ogni giorno.
+- Per tornare al deployment precedente: `rpm-ostree rollback`.
+- Per tornare a Bazzite originale:
+  `rpm-ostree rebase ostree-image-signed:docker://ghcr.io/ublue-os/bazzite-nvidia-open:stable`.
+
+### Cosa cambia rispetto a Fedora
+
+- Le azioni di `Galaxy Book Setup` che usano `dnf` o `akmods` (installare
+  pacchetti, ricostruire il driver, generare la chiave di akmods, installare
+  NVIDIA, reinstallare `fprintd`, attivare il ponte `v4l2-relayd`) non
+  funzionano su Bazzite. Driver e app sono inclusi nell'immagine; usa l'app per
+  la diagnostica.
+- NVIDIA è già inclusa nell'immagine (`nvidia-open`); non servono RPM Fusion né
+  `akmod-nvidia`.
+- Per la webcam nei browser, l'immagine include `pipewire-plugin-libcamera`:
+  attiva la fotocamera via PipeWire in Firefox
+  (`media.webrtc.camera.allow-pipewire` in `about:config`) o in Chromium
+  (`chrome://flags/#enable-webrtc-pipewire-camera`).
+- I comandi con `dnf` nelle sezioni seguenti valgono per Fedora tradizionale e
+  restano come riferimento storico.
 
 > [!IMPORTANT]
 > **Aggiornato il 21 aprile 2026**
@@ -74,8 +170,9 @@ Questo flusso installa:
 
 ## Indice
 
-- [Fedora sul Samsung Galaxy Book4 Ultra](#fedora-sul-samsung-galaxy-book4-ultra)
-  - [Installazione rapida](#installazione-rapida)
+- [Bazzite sul Samsung Galaxy Book4 Ultra](#bazzite-sul-samsung-galaxy-book4-ultra)
+  - [Perché Bazzite ha bisogno di un'immagine propria](#perché-bazzite-ha-bisogno-di-unimmagine-propria)
+  - [Installazione su Bazzite](#installazione-su-bazzite)
   - [Indice](#indice)
   - [Repository dedicati](#repository-dedicati)
     - [Riepilogo della soluzione attuale della fotocamera](#riepilogo-della-soluzione-attuale-della-fotocamera)
@@ -245,6 +342,9 @@ In altre parole: l'audio interno è uscito dallo stato di "indagine locale" ed �
 
 Oggi, il percorso che ha senso per l'audio è:
 
+> [!NOTE]
+> **Bazzite:** il supporto `MAX98390`, `Galaxy Book Setup` e `Galaxy Book Sound` sono già inclusi nell'immagine di questo repository (vedi [Installazione su Bazzite](#installazione-su-bazzite)). I comandi `dnf` qui sotto valgono solo per Fedora tradizionale.
+
 ```bash
 sudo dnf config-manager addrepo --from-repofile=https://packages.caioregis.com/fedora/caioregis.repo
 sudo dnf install galaxybook-setup galaxybook-sound akmod-galaxybook-max98390
@@ -410,7 +510,7 @@ ov02c10: unknown parameter 'clock_frequency' ignored
 modinfo -n ov02c10
 journalctl -b -k | grep -i ov02c10
 cam -l
-journalctl -b -u akmods --no-pager
+ujust galaxybook-status
 ```
 
 > [!CAUTION]
@@ -453,6 +553,9 @@ In altre parole: a questo punto, il lettore **non è nello scenario di hardware 
 
 Se il sensore compare, ma la registrazione o l'autenticazione falliscono, il percorso più sicuro continua a essere reinstallare lo stack e rifare la registrazione:
 
+> [!NOTE]
+> **Bazzite:** `fprintd` e `libfprint` fanno parte dell'immagine e non si reinstallano con `dnf`. Salta la prima riga qui sotto; il resto vale uguale.
+
 ```bash
 sudo dnf reinstall fprintd libfprint
 sudo systemctl restart fprintd
@@ -493,6 +596,9 @@ Vale anche la pena distinguere due cose che vengono spesso trattate come se foss
 Nel mio caso, il driver funzionava anche senza il binario `nvidia-smi` nel `PATH`. Su Fedora/RPM Fusion, questo binario arriva dal pacchetto `xorg-x11-drv-nvidia-cuda`, quindi va considerato come **strumento opzionale di amministrazione/diagnosi**, non come prerequisito per l'esistenza del driver.
 
 ![alt text](img/settings-gpu.png)
+
+> [!NOTE]
+> **Bazzite:** le immagini `bazzite-nvidia-open`, base di questo repository, includono già il driver NVIDIA e `nvidia-smi`, firmati con la chiave di Bazzite. Non installare RPM Fusion né `akmod-nvidia`; con Secure Boot attivo, esegui `ujust enroll-secure-boot-key`. I passaggi qui sotto valgono solo per Fedora tradizionale.
 
 ### Soluzione: installazione del driver NVIDIA
 
@@ -551,6 +657,7 @@ nvidia-smi
 | Componente     | Comando di diagnostica                                                                                                         |
 | :------------- | :----------------------------------------------------------------------------------------------------------------------------- |
 | **Kernel**     | `uname -r`                                                                                                                     |
+| **Bazzite**    | `ujust galaxybook-status`                                                                                                      |
 | **Audio**      | `aplay -l && wpctl status && cat /sys/module/snd_hda_intel/parameters/model && cat /sys/module/snd_hda_intel/parameters/patch` |
 | **Fotocamera** | `modinfo -n ov02c10 && journalctl -b -k \| grep -i ov02c10 && cam -l && journalctl -b -u akmods --no-pager`                    |
 | **Impronte**   | `fprintd-list $USER && systemctl status fprintd.service --no-pager && journalctl -b \| grep -i fprint`                         |
